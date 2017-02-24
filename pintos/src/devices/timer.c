@@ -7,7 +7,9 @@
 #include "threads/interrupt.h"
 #include "threads/synch.h"
 #include "threads/thread.h"
-  
+#include "threads/malloc.h"
+#include "lib/kernel/list.h"
+
 /* See [8254] for hardware details of the 8254 timer chip. */
 
 #if TIMER_FREQ < 19
@@ -16,6 +18,18 @@
 #if TIMER_FREQ > 1000
 #error TIMER_FREQ <= 1000 recommended
 #endif
+
+/* Sleeping process linked list */
+struct sleep_list_elem
+  {
+      int64_t ticks;
+      struct thread * t;
+      struct list_elem elem;
+  };
+
+/* List of sleeping processes state, that is, processes that
+   are temporarily blocked and waiting to move to the ready queue. */
+static struct list sleep_list;
 
 /* Number of timer ticks since OS booted. */
 static int64_t ticks;
@@ -30,18 +44,24 @@ static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
 
+/* Sleep queue. */
+void add_to_sleep(struct list * sleep_list, struct sleep_list_elem * elem);
+void remove_from_sleep(struct sleep_list_elem * sleep_elem);
+void sleep_tick(struct list * sleep_list);
+
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
-   and registers the corresponding interrupt. */
+  registers the corresponding interrupt and the sleeping process list. */
 void
-timer_init (void) 
+timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+  list_init (&sleep_list);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
 void
-timer_calibrate (void) 
+timer_calibrate (void)
 {
   unsigned high_bit, test_bit;
 
@@ -51,7 +71,7 @@ timer_calibrate (void)
   /* Approximate loops_per_tick as the largest power-of-two
      still less than one timer tick. */
   loops_per_tick = 1u << 10;
-  while (!too_many_loops (loops_per_tick << 1)) 
+  while (!too_many_loops (loops_per_tick << 1))
     {
       loops_per_tick <<= 1;
       ASSERT (loops_per_tick != 0);
@@ -68,7 +88,7 @@ timer_calibrate (void)
 
 /* Returns the number of timer ticks since the OS booted. */
 int64_t
-timer_ticks (void) 
+timer_ticks (void)
 {
   enum intr_level old_level = intr_disable ();
   int64_t t = ticks;
@@ -79,7 +99,7 @@ timer_ticks (void)
 /* Returns the number of timer ticks elapsed since THEN, which
    should be a value once returned by timer_ticks(). */
 int64_t
-timer_elapsed (int64_t then) 
+timer_elapsed (int64_t then)
 {
   return timer_ticks () - then;
 }
@@ -87,19 +107,37 @@ timer_elapsed (int64_t then)
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
 void
-timer_sleep (int64_t ticks) 
+timer_sleep (int64_t ticks)
 {
+  /* Record the time as soon as possible after calling sleep in case thread
+    is preempted */
   int64_t start = timer_ticks ();
 
-  ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+  /* Return immediately if ticks is 0 or less than 0 */
+  if (ticks <= 0)
+    return;
+
+  /* New structure to place sleeping thread in a queue */
+  struct sleep_list_elem * new_sleep_thread = (struct sleep_list_elem *) malloc (sizeof *new_sleep_thread);
+  new_sleep_thread->ticks = start + ticks;
+  new_sleep_thread->t = thread_current();
+
+  /* Accessing the sleeping threads list here, need to disable interrupts
+    as the code in timer interrupt can modify its structure */
+  enum intr_level old_level;
+  old_level = intr_disable ();
+
+  /* Add to the sleep queue and block */
+  add_to_sleep(&sleep_list,new_sleep_thread);
+  thread_block();
+
+  intr_set_level (old_level);
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
    turned on. */
 void
-timer_msleep (int64_t ms) 
+timer_msleep (int64_t ms)
 {
   real_time_sleep (ms, 1000);
 }
@@ -107,7 +145,7 @@ timer_msleep (int64_t ms)
 /* Sleeps for approximately US microseconds.  Interrupts must be
    turned on. */
 void
-timer_usleep (int64_t us) 
+timer_usleep (int64_t us)
 {
   real_time_sleep (us, 1000 * 1000);
 }
@@ -115,7 +153,7 @@ timer_usleep (int64_t us)
 /* Sleeps for approximately NS nanoseconds.  Interrupts must be
    turned on. */
 void
-timer_nsleep (int64_t ns) 
+timer_nsleep (int64_t ns)
 {
   real_time_sleep (ns, 1000 * 1000 * 1000);
 }
@@ -128,7 +166,7 @@ timer_nsleep (int64_t ns)
    will cause timer ticks to be lost.  Thus, use timer_msleep()
    instead if interrupts are enabled. */
 void
-timer_mdelay (int64_t ms) 
+timer_mdelay (int64_t ms)
 {
   real_time_delay (ms, 1000);
 }
@@ -141,7 +179,7 @@ timer_mdelay (int64_t ms)
    will cause timer ticks to be lost.  Thus, use timer_usleep()
    instead if interrupts are enabled. */
 void
-timer_udelay (int64_t us) 
+timer_udelay (int64_t us)
 {
   real_time_delay (us, 1000 * 1000);
 }
@@ -154,14 +192,14 @@ timer_udelay (int64_t us)
    will cause timer ticks to be lost.  Thus, use timer_nsleep()
    instead if interrupts are enabled.*/
 void
-timer_ndelay (int64_t ns) 
+timer_ndelay (int64_t ns)
 {
   real_time_delay (ns, 1000 * 1000 * 1000);
 }
 
 /* Prints timer statistics. */
 void
-timer_print_stats (void) 
+timer_print_stats (void)
 {
   printf ("Timer: %"PRId64" ticks\n", timer_ticks ());
 }
@@ -172,12 +210,13 @@ timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
   thread_tick ();
+  sleep_tick(&sleep_list);
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
    tick, otherwise false. */
 static bool
-too_many_loops (unsigned loops) 
+too_many_loops (unsigned loops)
 {
   /* Wait for a timer tick. */
   int64_t start = ticks;
@@ -201,7 +240,7 @@ too_many_loops (unsigned loops)
    differently in different places the results would be difficult
    to predict. */
 static void NO_INLINE
-busy_wait (int64_t loops) 
+busy_wait (int64_t loops)
 {
   while (loops-- > 0)
     barrier ();
@@ -209,12 +248,12 @@ busy_wait (int64_t loops)
 
 /* Sleep for approximately NUM/DENOM seconds. */
 static void
-real_time_sleep (int64_t num, int32_t denom) 
+real_time_sleep (int64_t num, int32_t denom)
 {
   /* Convert NUM/DENOM seconds into timer ticks, rounding down.
-          
-        (NUM / DENOM) s          
-     ---------------------- = NUM * TIMER_FREQ / DENOM ticks. 
+
+        (NUM / DENOM) s
+     ---------------------- = NUM * TIMER_FREQ / DENOM ticks.
      1 s / TIMER_FREQ ticks
   */
   int64_t ticks = num * TIMER_FREQ / denom;
@@ -224,14 +263,14 @@ real_time_sleep (int64_t num, int32_t denom)
     {
       /* We're waiting for at least one full timer tick.  Use
          timer_sleep() because it will yield the CPU to other
-         processes. */                
-      timer_sleep (ticks); 
+         processes. */
+      timer_sleep (ticks);
     }
-  else 
+  else
     {
       /* Otherwise, use a busy-wait loop for more accurate
          sub-tick timing. */
-      real_time_delay (num, denom); 
+      real_time_delay (num, denom);
     }
 }
 
@@ -242,5 +281,59 @@ real_time_delay (int64_t num, int32_t denom)
   /* Scale the numerator and denominator down by 1000 to avoid
      the possibility of overflow. */
   ASSERT (denom % 1000 == 0);
-  busy_wait (loops_per_tick * num / 1000 * TIMER_FREQ / (denom / 1000)); 
+  busy_wait (loops_per_tick * num / 1000 * TIMER_FREQ / (denom / 1000));
+}
+
+/* Adds a thread to the queue of sleeping threads */
+void
+add_to_sleep(struct list * sleep_list, struct sleep_list_elem * sleep_thread)
+{
+  ASSERT (intr_get_level () == INTR_OFF);
+  ASSERT (sleep_list != NULL);
+  ASSERT (sleep_thread != NULL);
+
+  /* Iterate through list to insert new sleeping thread in the right order */
+  struct list_elem *next_element = list_end(sleep_list)->prev;
+  struct sleep_list_elem *next_sleep_thread = list_entry (next_element,
+                                                  struct sleep_list_elem,
+                                                  elem);
+
+  while(next_element != &sleep_list->head
+        && (next_sleep_thread->ticks > sleep_thread->ticks)){
+
+      next_element = list_prev (next_element);
+      next_sleep_thread = list_entry (next_element, struct sleep_list_elem,
+                                      elem);
+  }
+  /* Insert the thread in order in the queue, need to insert BEFORE element
+    with a greater tick value */
+  list_insert (next_element->next, &sleep_thread->elem);
+}
+
+/* Removes a thread from the queue of sleeping threads */
+void
+remove_from_sleep(struct sleep_list_elem * sleep_elem)
+{
+  list_remove (&sleep_elem->elem);
+  thread_unblock(sleep_elem->t);
+}
+
+/* Unblocks all sleeping threads for which their sleeping time has passed */
+void
+sleep_tick(struct list * sleep_list)
+{
+  struct list_elem *next_element = list_begin (sleep_list);
+  struct sleep_list_elem *next_sleep_thread = list_entry (next_element,
+                                                  struct sleep_list_elem,
+                                                  elem);
+
+  while(next_element != &sleep_list->tail
+        && timer_elapsed (next_sleep_thread->ticks) > 0){
+
+      remove_from_sleep(next_sleep_thread);
+
+      /* Get the new head of the sleeping list */
+      next_element = list_begin (sleep_list);
+      next_sleep_thread = list_entry (next_element, struct sleep_list_elem, elem);
+  }
 }
