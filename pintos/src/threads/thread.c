@@ -68,6 +68,7 @@ static void init_thread (struct thread *, const char *name, int priority);
 static bool is_thread (struct thread *) UNUSED;
 static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
+static void add_to_ready_list(struct thread * t);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 
@@ -237,7 +238,7 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  add_to_ready_list(t);
   t->status = THREAD_READY;
   intr_set_level (old_level);
 }
@@ -308,7 +309,7 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread)
-    list_push_back (&ready_list, &cur->elem);
+    add_to_ready_list(cur);
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -564,6 +565,29 @@ schedule (void)
     prev = switch_threads (cur, next);
   thread_schedule_tail (prev);
 }
+
+/* Adds the thread to the ready list in order of priority in order of Highest
+  priority ot the lowest */
+static void
+add_to_ready_list (struct thread * t)
+{
+  ASSERT (is_thread (t));
+
+  struct list_elem *next_element = list_begin(&ready_list);
+  struct thread *next_thread = list_entry (next_element,
+                                                  struct thread, elem);
+
+  while(next_element != &ready_list.tail &&
+    (next_thread->priority >= t->priority))
+  {
+      next_element = list_next (next_element);
+      next_thread = list_entry (next_element, struct thread, elem);
+  }
+  /* Insert the thread in order in the queue, need to insert BEFORE element
+    with a greater tick value */
+  list_insert (next_element, &t->elem);
+}
+
 
 /* Returns a tid to use for a new thread. */
 static tid_t
