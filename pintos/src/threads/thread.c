@@ -109,7 +109,7 @@ thread_start (void)
   /* Create the idle thread. */
   struct semaphore idle_started;
   sema_init (&idle_started, 0);
-  thread_create ("idle", PRI_MIN, idle, &idle_started);
+  thread_create ("idle", PRI_DEFAULT, idle, &idle_started);
 
   /* Start preemptive thread scheduling. */
   intr_enable ();
@@ -343,7 +343,7 @@ thread_set_priority (int new_priority)
 int
 thread_get_priority (void)
 {
-  return thread_current ()->priority;
+  return thread_current ()->max_priority;
 }
 
 /* Sets the current thread's nice value to NICE. */
@@ -463,7 +463,10 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->max_priority = priority;
   t->magic = THREAD_MAGIC;
+
+  list_init (&t->locks);
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
@@ -578,7 +581,7 @@ add_to_ready_list (struct thread * t)
                                                   struct thread, elem);
 
   while(next_element != &ready_list.tail &&
-    (next_thread->priority >= t->priority))
+    (next_thread->max_priority >= t->max_priority))
   {
       next_element = list_next (next_element);
       next_thread = list_entry (next_element, struct thread, elem);

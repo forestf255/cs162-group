@@ -90,6 +90,14 @@ struct thread
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
+    int max_priority;                   /* Max of Priorty and Donated Priority. */
+
+    struct thread * donee;               /* The thread that is holding the
+                                          desired lock  */
+
+    struct list locks;                  /* List of all locks held must be kept
+                                          in order to maintain true priority */
+
     struct list_elem allelem;           /* List element for all threads list. */
 
     /* Shared between thread.c and synch.c. */
@@ -102,6 +110,14 @@ struct thread
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
+  };
+
+/* Stores all the held locks of a given thread and the maximum donated priority
+    attached to each lock */
+struct donor
+  {
+    struct lock * l;
+    int priority;                       /* Maximum priority of any waiters */
   };
 
 /* If false (default), use round-robin scheduler.
@@ -134,6 +150,10 @@ void thread_foreach (thread_action_func *, void *);
 
 int thread_get_priority (void);
 void thread_set_priority (int);
+void thread_set_donee (struct thread *t, struct thread *p);
+void thread_remove_donee (struct thread *t);
+void thread_add_doner (struct thread *t, struct lock *l);
+void thread_remove_donor (struct thread *t, struct lock *l);
 
 int thread_get_nice (void);
 void thread_set_nice (int);
