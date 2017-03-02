@@ -11,6 +11,7 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -60,7 +61,7 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
 bool thread_mlfqs;
 
 static void kernel_thread (thread_func *, void *aux);
-
+static struct donor *get_donor(struct thread * thread, struct lock * lock);
 static void idle (void *aux UNUSED);
 static struct thread *running_thread (void);
 static struct thread *next_thread_to_run (void);
@@ -202,6 +203,9 @@ thread_create (const char *name, int priority,
   /* Add to run queue. */
   thread_unblock (t);
 
+  if (priority > thread_current ()->max_priority)
+    thread_yield ();
+
   return tid;
 }
 
@@ -336,7 +340,25 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority)
 {
-  thread_current ()->priority = new_priority;
+  struct thread * curr_thread = thread_current ();
+
+  int prev_priority = curr_thread->max_priority;
+  curr_thread->priority = new_priority;
+  curr_thread->max_priority = new_priority;
+
+  struct list_elem * next_elem = list_begin (&curr_thread->donors);
+  struct donor * donor;
+
+  while (next_elem != list_end (&curr_thread->donors))
+  {
+    donor = list_entry (next_elem, struct donor, elem);
+    if (donor->priority > curr_thread->max_priority)
+      curr_thread->max_priority = donor->priority;
+    next_elem = list_next (next_elem);
+  }
+
+  if (curr_thread->max_priority < prev_priority)
+    thread_yield();
 }
 
 /* Returns the current thread's priority. */
@@ -345,6 +367,136 @@ thread_get_priority (void)
 {
   return thread_current ()->max_priority;
 }
+
+/* Sets the thread (p) that thread (t) is waiting on to finish using a lock */
+void
+thread_set_donee (struct thread * donor, struct lock * lock, struct thread * thread)
+{
+  ASSERT (is_thread (thread));
+  ASSERT (is_thread (donor));
+  ASSERT (lock != NULL);
+
+  donor->donee_thread = thread;
+  donor->donee_lock = lock;
+}
+
+/* Removes the thread (p) that threat (t) was waiting on to finish */
+void
+thread_remove_donee (struct thread * thread)
+{
+  ASSERT (is_thread (thread));
+
+  thread->donee_thread = NULL;
+  thread->donee_lock = NULL;
+}
+
+/* Donates a higher priority to a thread */
+void
+thread_add_doner (struct thread * thread, struct lock * lock, int priority)
+{
+  ASSERT (intr_get_level () == INTR_OFF);
+  ASSERT (is_thread (thread));
+  ASSERT (lock != NULL);
+  ASSERT (priority <= PRI_MAX);
+
+  if (priority > thread->priority)
+  {
+    struct donor * donor = get_donor(thread, lock);
+
+    if (donor != NULL && priority > donor->priority)
+    {
+      donor->priority = priority;
+    }
+    else if (donor == NULL)
+    {
+      donor = (struct donor *) malloc (sizeof *donor);
+      donor->lock = lock;
+      donor->priority = priority;
+      list_push_back (&thread->donors, &donor->elem);
+    }
+
+    if (priority > thread->max_priority)
+    {
+      thread->max_priority = priority;
+      /* Need to move the thread into sorted order if priority increased */
+      list_remove (&thread->elem);
+      add_to_ready_list(thread);
+    }
+
+    if (thread->donee_lock != NULL && thread->donee_thread != NULL)
+    {
+      /* Handles nested priority donation */
+      thread_add_doner(thread->donee_thread, thread->donee_lock, priority);
+    }
+  }
+}
+
+/* Removes any waiting donors once the thread (t) releases a lock */
+void
+thread_remove_donor (struct thread * thread, struct lock * lock)
+{
+  ASSERT (intr_get_level () == INTR_OFF);
+  ASSERT (is_thread (thread));
+  ASSERT (lock != NULL);
+
+  struct donor * donor = get_donor(thread, lock);
+
+  if (donor != NULL)
+  {
+    list_remove (&donor->elem);
+    free(donor);
+
+    struct list_elem * next_elem = list_begin (&thread->donors);
+    thread->max_priority = thread->priority;
+
+    /* Select the next highest priority donation if available */
+    while (next_elem != list_end (&thread->donors))
+    {
+      donor = list_entry (next_elem, struct donor, elem);
+      if (donor->priority > thread->max_priority)
+        thread->max_priority = donor->priority;
+      next_elem = list_next (next_elem);
+    }
+  }
+}
+
+
+void
+thread_update_donors (struct thread * thread, struct lock *lock)
+{
+  ASSERT (intr_get_level () == INTR_OFF);
+  ASSERT (is_thread (thread));
+  ASSERT (lock != NULL);
+
+  struct list_elem * e = list_begin (&lock->semaphore.waiters);
+  struct thread * t;
+
+  while (e != list_end (&lock->semaphore.waiters))
+  {
+    t = list_entry (e, struct thread, elem);
+    thread_set_donee (t, lock, thread);
+    e = list_next (e);
+  }
+}
+
+/* Returns any donation who is waiting on lock (l) otherwise NULL */
+static struct donor *
+get_donor(struct thread * thread, struct lock * lock)
+{
+  struct list_elem * e = list_begin (&thread->donors);
+  struct donor * d;
+  while (e != list_end (&thread->donors))
+  {
+    d = list_entry (e, struct donor, elem);
+    if (d->lock == lock)
+      return d;
+    e = list_next (e);
+  }
+
+  return NULL;
+}
+
+
 
 /* Sets the current thread's nice value to NICE. */
 void
@@ -466,7 +618,7 @@ init_thread (struct thread *t, const char *name, int priority)
   t->max_priority = priority;
   t->magic = THREAD_MAGIC;
 
-  list_init (&t->locks);
+  list_init (&t->donors);
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);

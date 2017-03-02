@@ -92,10 +92,12 @@ struct thread
     int priority;                       /* Priority. */
     int max_priority;                   /* Max of Priorty and Donated Priority. */
 
-    struct thread * donee;               /* The thread that is holding the
+    struct thread * donee_thread;               /* The thread that is holding the
                                           desired lock  */
 
-    struct list locks;                  /* List of all locks held must be kept
+    struct lock * donee_lock;
+
+    struct list donors;                  /* List of all locks held must be kept
                                           in order to maintain true priority */
 
     struct list_elem allelem;           /* List element for all threads list. */
@@ -116,8 +118,9 @@ struct thread
     attached to each lock */
 struct donor
   {
-    struct lock * l;
+    struct lock * lock;
     int priority;                       /* Maximum priority of any waiters */
+    struct list_elem elem;
   };
 
 /* If false (default), use round-robin scheduler.
@@ -150,10 +153,11 @@ void thread_foreach (thread_action_func *, void *);
 
 int thread_get_priority (void);
 void thread_set_priority (int);
-void thread_set_donee (struct thread *t, struct thread *p);
-void thread_remove_donee (struct thread *t);
-void thread_add_doner (struct thread *t, struct lock *l);
-void thread_remove_donor (struct thread *t, struct lock *l);
+void thread_set_donee (struct thread * donor, struct lock * lock, struct thread * thread);
+void thread_remove_donee (struct thread * thread);
+void thread_add_doner (struct thread * thread, struct lock * lock, int priority);
+void thread_remove_donor (struct thread * thread, struct lock * lock);
+void thread_update_donors (struct thread * thread, struct lock * lock);
 
 int thread_get_nice (void);
 void thread_set_nice (int);
