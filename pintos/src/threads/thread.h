@@ -90,15 +90,11 @@ struct thread
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
-    int max_priority;                   /* Max of Priorty and Donated Priority. */
+    int *max_priority;                   /* Max of Priorty and Donated Priority. */
+    struct lock *blocker;               /* Any lock that the thread is currently
+                                            waiting on */
 
-    struct thread * donee_thread;               /* The thread that is holding the
-                                          desired lock  */
-
-    struct lock * donee_lock;
-
-    struct list donors;                  /* List of all locks held must be kept
-                                          in order to maintain true priority */
+    struct list locks;                  /* Locks that the current thread holds */
 
     struct list_elem allelem;           /* List element for all threads list. */
 
@@ -112,15 +108,6 @@ struct thread
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
-  };
-
-/* Stores all the held locks of a given thread and the maximum donated priority
-    attached to each lock */
-struct donor
-  {
-    struct lock * lock;
-    int priority;                       /* Maximum priority of any waiters */
-    struct list_elem elem;
   };
 
 /* If false (default), use round-robin scheduler.
@@ -151,13 +138,15 @@ void thread_yield (void);
 typedef void thread_action_func (struct thread *t, void *aux);
 void thread_foreach (thread_action_func *, void *);
 
-int thread_get_priority (void);
 void thread_set_priority (int);
-void thread_set_donee (struct thread * donor, struct lock * lock, struct thread * thread);
-void thread_remove_donee (struct thread * thread);
-void thread_add_doner (struct thread * thread, struct lock * lock, int priority);
-void thread_remove_donor (struct thread * thread, struct lock * lock);
-void thread_update_donors (struct thread * thread, struct lock * lock);
+int thread_get_priority (void);
+int thread_get_max_priority(struct thread *thread);
+void thread_update_priority(struct thread *thread);
+void thread_set_blocker (struct lock *lock);
+struct lock *thread_get_blocker (struct thread *thread);
+void thread_remove_blocker (void);
+void thread_add_lock (struct lock *lock);
+void thread_remove_lock (struct lock *lock);
 
 int thread_get_nice (void);
 void thread_set_nice (int);

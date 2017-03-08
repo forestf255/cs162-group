@@ -61,7 +61,6 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
 bool thread_mlfqs;
 
 static void kernel_thread (thread_func *, void *aux);
-static struct donor *get_donor(struct thread * thread, struct lock * lock);
 static void idle (void *aux UNUSED);
 static struct thread *running_thread (void);
 static struct thread *next_thread_to_run (void);
@@ -203,7 +202,7 @@ thread_create (const char *name, int priority,
   /* Add to run queue. */
   thread_unblock (t);
 
-  if (priority > thread_current ()->max_priority)
+  if (priority > thread_get_priority ())
     thread_yield ();
 
   return tid;
@@ -342,22 +341,12 @@ thread_set_priority (int new_priority)
 {
   struct thread * curr_thread = thread_current ();
 
-  int prev_priority = curr_thread->max_priority;
+  int prev_priority = thread_get_priority ();
   curr_thread->priority = new_priority;
-  curr_thread->max_priority = new_priority;
 
-  struct list_elem * next_elem = list_begin (&curr_thread->donors);
-  struct donor * donor;
+  thread_update_priority( thread_current ());
 
-  while (next_elem != list_end (&curr_thread->donors))
-  {
-    donor = list_entry (next_elem, struct donor, elem);
-    if (donor->priority > curr_thread->max_priority)
-      curr_thread->max_priority = donor->priority;
-    next_elem = list_next (next_elem);
-  }
-
-  if (curr_thread->max_priority < prev_priority)
+  if (thread_get_priority () < prev_priority)
     thread_yield();
 }
 
@@ -365,138 +354,77 @@ thread_set_priority (int new_priority)
 int
 thread_get_priority (void)
 {
-  return thread_current ()->max_priority;
+  return *(thread_current ()->max_priority);
 }
 
-/* Sets the thread (p) that thread (t) is waiting on to finish using a lock */
-void
-thread_set_donee (struct thread * donor, struct lock * lock, struct thread * thread)
+/* Returns the priority of an external thread */
+int
+thread_get_max_priority (struct thread *thread)
 {
-  ASSERT (is_thread (thread));
-  ASSERT (is_thread (donor));
-  ASSERT (lock != NULL);
-
-  donor->donee_thread = thread;
-  donor->donee_lock = lock;
+  return *thread->max_priority;
 }
 
-/* Removes the thread (p) that threat (t) was waiting on to finish */
+/* Updates the max priority to take into account of any donations */
 void
-thread_remove_donee (struct thread * thread)
+thread_update_priority(struct thread *thread)
 {
-  ASSERT (is_thread (thread));
+  thread->max_priority = &thread->priority;
 
-  thread->donee_thread = NULL;
-  thread->donee_lock = NULL;
-}
+  struct list_elem *e = list_begin (&thread->locks);
+  struct lock *lock;
 
-/* Donates a higher priority to a thread */
-void
-thread_add_doner (struct thread * thread, struct lock * lock, int priority)
-{
-  ASSERT (intr_get_level () == INTR_OFF);
-  ASSERT (is_thread (thread));
-  ASSERT (lock != NULL);
-  ASSERT (priority <= PRI_MAX);
-
-  if (priority > thread->priority)
+  for (; e != list_end (&thread->locks); e = list_next (e))
   {
-    struct donor * donor = get_donor(thread, lock);
-
-    if (donor != NULL && priority > donor->priority)
+    lock = list_entry (e, struct lock, elem);
+    if (lock->priority > *thread->max_priority)
     {
-      donor->priority = priority;
-    }
-    else if (donor == NULL)
-    {
-      donor = (struct donor *) malloc (sizeof *donor);
-      donor->lock = lock;
-      donor->priority = priority;
-      list_push_back (&thread->donors, &donor->elem);
-    }
-
-    if (priority > thread->max_priority)
-    {
-      thread->max_priority = priority;
-      /* Need to move the thread into sorted order if priority increased */
-      list_remove (&thread->elem);
-      add_to_ready_list(thread);
-    }
-
-    if (thread->donee_lock != NULL && thread->donee_thread != NULL)
-    {
-      /* Handles nested priority donation */
-      thread_add_doner(thread->donee_thread, thread->donee_lock, priority);
+      thread->max_priority = &lock->priority;
     }
   }
+}
+
+/* Sets a pointer to the lock the current thread will be waiting on to finish */
+void
+thread_set_blocker (struct lock *lock)
+{
+  ASSERT (lock != NULL);
+
+  thread_current ()->blocker = lock;
+}
+
+/* Returns the lock that the thread is currently waiting on to become
+  available. It returns a NULL pointer if there is no such lock */
+struct lock *
+thread_get_blocker (struct thread *thread)
+{
+  return thread->blocker;
+}
+
+/* Removes the pointer to the lock that the current thread was previously
+  waiting on to become available */
+void
+thread_remove_blocker (void)
+{
+  thread_current ()->blocker = NULL;
+}
+
+/* Adds a lock to the list of held locks for the current thread */
+void
+thread_add_lock (struct lock * lock)
+{
+  ASSERT (lock != NULL);
+
+  list_push_back (&thread_current()->locks, &lock->elem);
 }
 
 /* Removes any waiting donors once the thread (t) releases a lock */
 void
-thread_remove_donor (struct thread * thread, struct lock * lock)
+thread_remove_lock (struct lock * lock)
 {
-  ASSERT (intr_get_level () == INTR_OFF);
-  ASSERT (is_thread (thread));
   ASSERT (lock != NULL);
 
-  struct donor * donor = get_donor(thread, lock);
-
-  if (donor != NULL)
-  {
-    list_remove (&donor->elem);
-    free(donor);
-
-    struct list_elem * next_elem = list_begin (&thread->donors);
-    thread->max_priority = thread->priority;
-
-    /* Select the next highest priority donation if available */
-    while (next_elem != list_end (&thread->donors))
-    {
-      donor = list_entry (next_elem, struct donor, elem);
-      if (donor->priority > thread->max_priority)
-        thread->max_priority = donor->priority;
-      next_elem = list_next (next_elem);
-    }
-  }
+  list_remove (&lock->elem);
 }
-
-
-void
-thread_update_donors (struct thread * thread, struct lock *lock)
-{
-  ASSERT (intr_get_level () == INTR_OFF);
-  ASSERT (is_thread (thread));
-  ASSERT (lock != NULL);
-
-  struct list_elem * e = list_begin (&lock->semaphore.waiters);
-  struct thread * t;
-
-  while (e != list_end (&lock->semaphore.waiters))
-  {
-    t = list_entry (e, struct thread, elem);
-    thread_set_donee (t, lock, thread);
-    e = list_next (e);
-  }
-}
-
-/* Returns any donation who is waiting on lock (l) otherwise NULL */
-static struct donor *
-get_donor(struct thread * thread, struct lock * lock)
-{
-  struct list_elem * e = list_begin (&thread->donors);
-  struct donor * d;
-  while (e != list_end (&thread->donors))
-  {
-    d = list_entry (e, struct donor, elem);
-    if (d->lock == lock)
-      return d;
-    e = list_next (e);
-  }
-
-  return NULL;
-}
-
-
 
 /* Sets the current thread's nice value to NICE. */
 void
@@ -615,10 +543,11 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
-  t->max_priority = priority;
+  t->max_priority = &t->priority;
   t->magic = THREAD_MAGIC;
+  t->blocker = NULL;
 
-  list_init (&t->donors);
+  list_init (&t->locks);
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
@@ -724,23 +653,22 @@ schedule (void)
 /* Adds the thread to the ready list in order of priority in order of Highest
   priority ot the lowest */
 static void
-add_to_ready_list (struct thread * t)
+add_to_ready_list (struct thread * ready_thread)
 {
-  ASSERT (is_thread (t));
+  ASSERT (is_thread (ready_thread));
 
-  struct list_elem *next_element = list_begin(&ready_list);
-  struct thread *next_thread = list_entry (next_element,
-                                                  struct thread, elem);
+  struct list_elem *e = list_begin(&ready_list);
+  struct thread *t = list_entry (e, struct thread, elem);
 
-  while(next_element != &ready_list.tail &&
-    (next_thread->max_priority >= t->max_priority))
+  while(e != list_end (&ready_list) &&
+   (thread_get_max_priority (t) >= thread_get_max_priority (ready_thread)))
   {
-      next_element = list_next (next_element);
-      next_thread = list_entry (next_element, struct thread, elem);
+      e = list_next (e);
+      t = list_entry (e, struct thread, elem);
   }
   /* Insert the thread in order in the queue, need to insert BEFORE element
     with a greater tick value */
-  list_insert (next_element, &t->elem);
+  list_insert (e, &ready_thread->elem);
 }
 
 
