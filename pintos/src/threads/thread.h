@@ -90,13 +90,17 @@ struct thread
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
-    int *max_priority;                   /* Max of Priorty and Donated Priority. */
+    int *max_priority;                  /* Max of Priorty and Donated Priority. */
+    int nice;                           /* NICE value */
+    fixed_point_t recent_cpu;           /* Recent CPU */
     struct lock *blocker;               /* Any lock that the thread is currently
                                             waiting on */
 
     struct list locks;                  /* Locks that the current thread holds */
 
     struct list_elem allelem;           /* List element for all threads list. */
+
+    struct list_elem priorityelem;     /* List element for priority level list */
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */

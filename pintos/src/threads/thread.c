@@ -12,6 +12,7 @@
 #include "threads/synch.h"
 #include "threads/vaddr.h"
 #include "threads/malloc.h"
+#include "devices/timer.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -28,6 +29,9 @@ static struct list ready_list;
 /* List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
 static struct list all_list;
+
+/* Lists for each priority */
+static struct list priority_list[PRI_MAX+1];
 
 /* Idle thread. */
 static struct thread *idle_thread;
@@ -50,6 +54,7 @@ struct kernel_thread_frame
 static long long idle_ticks;    /* # of timer ticks spent idle. */
 static long long kernel_ticks;  /* # of timer ticks in kernel threads. */
 static long long user_ticks;    /* # of timer ticks in user programs. */
+static fixed_point_t load_avg;  /* Load average used for mlfqs scheduling. */
 
 /* Scheduling. */
 #define TIME_SLICE 4            /* # of timer ticks to give each thread. */
@@ -59,6 +64,12 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
+
+static void update_load_avg (void);
+void thread_increment_cpu (void);
+void thread_update_cpu(struct thread *t, void *aux UNUSED);
+void thread_calculate_priority (struct thread *thread, void *aux UNUSED);
+
 
 static void kernel_thread (thread_func *, void *aux);
 static void idle (void *aux UNUSED);
@@ -94,6 +105,12 @@ thread_init (void)
   list_init (&ready_list);
   list_init (&all_list);
 
+  int i;
+  for (i = 0; i < PRI_MAX; i++)
+  {
+    list_init(&priority_list[i]);
+  }
+
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
   init_thread (initial_thread, "main", PRI_DEFAULT);
@@ -124,6 +141,24 @@ void
 thread_tick (void)
 {
   struct thread *t = thread_current ();
+
+  if (thread_mlfqs)
+  {
+    //Increment the recent CPU of the current thread
+    thread_increment_cpu();
+
+    if (timer_ticks() % TIMER_FREQ == 0)
+    {
+      update_load_avg ();
+
+      //Update the recent CPU for all threads
+    }
+
+    if (timer_ticks() % 4 == 0)
+    {
+      //Update priority for all threads
+    }
+  }
 
   /* Update statistics. */
   if (t == idle_thread)
@@ -339,6 +374,8 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority)
 {
+  ASSERT (!thread_mlfqs);
+
   struct thread * curr_thread = thread_current ();
 
   int prev_priority = thread_get_priority ();
@@ -355,6 +392,16 @@ int
 thread_get_priority (void)
 {
   return *(thread_current ()->max_priority);
+}
+
+/* Calculates the threads new priority when using the mlfqs algorithm */
+void
+thread_calculate_priority (struct thread *thread, void *aux UNUSED)
+{
+  ASSERT (thread_mlfqs);
+
+  thread->priority = PRI_MAX - fix_round (fix_div (thread->recent_cpu, fix_int(4))) - thread->nice * 2;
+  thread->priority = thread->priority < 0 ? 0 : thread->priority;
 }
 
 /* Returns the priority of an external thread */
@@ -428,34 +475,80 @@ thread_remove_lock (struct lock * lock)
 
 /* Sets the current thread's nice value to NICE. */
 void
-thread_set_nice (int nice UNUSED)
+thread_set_nice (int nice)
 {
-  /* Not yet implemented. */
+  thread_current ()->nice = nice;
+  thread_calculate_priority (thread_current (), 0);
+
+  struct thread *t;
+
+  int i;
+  for (i = PRI_MAX; i >= 0; i--)
+  {
+    if (!list_empty (&priority_list[i]))
+    {
+      t = list_entry (list_begin (&priority_list[i]), struct thread, priorityelem);
+    }
+  }
+
+  if (t != thread_current ())
+  {
+    thread_yield();
+  }
 }
 
 /* Returns the current thread's nice value. */
 int
 thread_get_nice (void)
 {
-  /* Not yet implemented. */
-  return 0;
+  return thread_current ()->nice;
 }
 
 /* Returns 100 times the system load average. */
 int
 thread_get_load_avg (void)
 {
-  /* Not yet implemented. */
-  return 0;
+  return fix_round (fix_scale (load_avg,100));
+}
+
+/* Updates the system load average. Should be called once per second. */
+static void
+update_load_avg (void)
+{
+  fixed_point_t overflow = load_avg;
+  load_avg = fix_add (fix_mul (load_avg, fix_int (59)), fix_int(list_size (&ready_list)));
+
+  ASSERT (fix_compare (load_avg, overflow) == 1);
+
+  load_avg = fix_div (load_avg, fix_int (60));
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int
 thread_get_recent_cpu (void)
 {
-  /* Not yet implemented. */
-  return 0;
+  return fix_round (fix_scale (thread_current ()->recent_cpu,100));
 }
+
+/* Increment the recent cpu count of the current thread by 1. */
+void
+thread_increment_cpu (void)
+{
+  struct thread *t = thread_current ();
+  t->recent_cpu = fix_add (t->recent_cpu,fix_int(1));
+}
+
+/* Updates the recent cpu count of the current thread. Should be run once
+    per second */
+void
+thread_update_cpu(struct thread *t, void *aux UNUSED)
+{
+  fixed_point_t coeff = fix_add (fix_scale (t->recent_cpu, 2), fix_int (1));
+  coeff = fix_div (fix_scale (t->recent_cpu, 2), coeff);
+  t->recent_cpu = fix_mul(t->recent_cpu,coeff);
+  t->recent_cpu = fix_add(t->recent_cpu, fix_int (t->nice));
+}
+
 
 /* Idle thread.  Executes when no other thread is ready to run.
 
