@@ -250,7 +250,7 @@ lock_acquire (struct lock *lock)
 
   old_level = intr_disable ();
 
-  if (lock->holder != NULL)
+  if (!thread_mlfqs && lock->holder != NULL)
   {
     thread_set_blocker (lock);
     lock_donate_priority (lock, *thread_current ()->max_priority);
@@ -403,7 +403,7 @@ cond_signal (struct condition *cond, struct lock *lock UNUSED)
   if (!list_empty (&cond->waiters))
   {
     struct list_elem *e = list_begin (&cond->waiters);
-    struct semaphore_elem *waiter;
+    struct semaphore_elem *waiter = list_entry (e, struct semaphore_elem, elem);
     struct semaphore_elem *next_waiter = waiter;
     int max_priority = -1;
 

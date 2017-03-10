@@ -152,11 +152,13 @@ thread_tick (void)
       update_load_avg ();
 
       //Update the recent CPU for all threads
+      thread_foreach (thread_update_cpu, 0);
     }
 
     if (timer_ticks() % 4 == 0)
     {
       //Update priority for all threads
+      thread_foreach (thread_calculate_priority, 0);
     }
   }
 
@@ -329,7 +331,9 @@ thread_exit (void)
      and schedule another process.  That process will destroy us
      when it calls thread_schedule_tail(). */
   intr_disable ();
-  list_remove (&thread_current()->allelem);
+
+  list_remove (&thread_current ()->allelem);
+
   thread_current ()->status = THREAD_DYING;
   schedule ();
   NOT_REACHED ();
@@ -402,6 +406,10 @@ thread_calculate_priority (struct thread *thread, void *aux UNUSED)
 
   thread->priority = PRI_MAX - fix_round (fix_div (thread->recent_cpu, fix_int(4))) - thread->nice * 2;
   thread->priority = thread->priority < 0 ? 0 : thread->priority;
+
+  if (thread->elem.next != NULL && thread->elem.prev != NULL)
+    list_remove(&thread->elem);
+  list_push_back (&priority_list[thread->priority], &thread->elem);
 }
 
 /* Returns the priority of an external thread */
@@ -415,6 +423,9 @@ thread_get_max_priority (struct thread *thread)
 void
 thread_update_priority(struct thread *thread)
 {
+  if (thread_mlfqs)
+    return;
+
   thread->max_priority = &thread->priority;
 
   struct list_elem *e = list_begin (&thread->locks);
@@ -477,17 +488,19 @@ thread_remove_lock (struct lock * lock)
 void
 thread_set_nice (int nice)
 {
+  ASSERT (thread_mlfqs);
+
   thread_current ()->nice = nice;
   thread_calculate_priority (thread_current (), 0);
 
-  struct thread *t;
+  struct thread *t = NULL;
 
   int i;
   for (i = PRI_MAX; i >= 0; i--)
   {
     if (!list_empty (&priority_list[i]))
     {
-      t = list_entry (list_begin (&priority_list[i]), struct thread, priorityelem);
+      t = list_entry (list_begin (&priority_list[i]), struct thread, elem);
     }
   }
 
@@ -639,6 +652,8 @@ init_thread (struct thread *t, const char *name, int priority)
   t->max_priority = &t->priority;
   t->magic = THREAD_MAGIC;
   t->blocker = NULL;
+  t->recent_cpu = fix_int(0);
+  t->nice = 0;
 
   list_init (&t->locks);
 
@@ -668,10 +683,27 @@ alloc_frame (struct thread *t, size_t size)
 static struct thread *
 next_thread_to_run (void)
 {
-  if (list_empty (&ready_list))
-    return idle_thread;
+  if (thread_mlfqs)
+  {
+    struct thread *t = NULL;
+    int i;
+    for (i = PRI_MAX; i >= 0; i--)
+    {
+      if (!list_empty(&priority_list[i]))
+      {
+        t = list_entry(list_pop_front(&priority_list[i]), struct thread, elem);
+        break;
+      }
+    }
+    return t != NULL ? t : idle_thread;
+  }
   else
-    return list_entry (list_pop_front (&ready_list), struct thread, elem);
+  {
+    if (list_empty (&ready_list))
+      return idle_thread;
+    else
+      return list_entry(list_pop_front(&ready_list), struct thread, elem);
+  }
 }
 
 /* Completes a thread switch by activating the new thread's page
@@ -750,18 +782,24 @@ add_to_ready_list (struct thread * ready_thread)
 {
   ASSERT (is_thread (ready_thread));
 
-  struct list_elem *e = list_begin(&ready_list);
-  struct thread *t = list_entry (e, struct thread, elem);
-
-  while(e != list_end (&ready_list) &&
-   (thread_get_max_priority (t) >= thread_get_max_priority (ready_thread)))
+  if (thread_mlfqs)
   {
-      e = list_next (e);
-      t = list_entry (e, struct thread, elem);
+    list_push_back(&priority_list[thread_get_max_priority(ready_thread)],
+                    &ready_thread->elem);
   }
-  /* Insert the thread in order in the queue, need to insert BEFORE element
-    with a greater tick value */
-  list_insert (e, &ready_thread->elem);
+  else{
+    struct list_elem *e = list_begin (&ready_list);
+    struct thread *t = list_entry (e, struct thread, elem);
+
+    while (e != list_end (&ready_list) &&
+            thread_get_max_priority(ready_thread) > thread_get_max_priority(t))
+    {
+      e = list_next(e);
+      t = list_entry (e, struct thread, elem);
+    }
+
+    list_insert (e,&ready_thread->elem);
+  }
 }
 
 
