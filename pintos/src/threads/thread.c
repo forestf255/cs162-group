@@ -377,7 +377,6 @@ thread_calculate_priority (struct thread *thread, void *aux UNUSED)
   thread->priority = thread->priority < PRI_MIN ? PRI_MIN : thread->priority;
   thread->priority = thread->priority > PRI_MAX ? PRI_MAX : thread->priority;
 
-
   if (thread->priority != last_priority && thread->status == THREAD_READY
         && thread != thread_current ())
   {
