@@ -26,6 +26,8 @@
    that are ready to run but not actually running. */
 static struct list ready_list;
 
+static int ready_count = 0;
+
 /* List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
 static struct list all_list;
@@ -106,7 +108,7 @@ thread_init (void)
   list_init (&all_list);
 
   int i;
-  for (i = 0; i < PRI_MAX; i++)
+  for (i = 0; i <= PRI_MAX; i++)
   {
     list_init(&priority_list[i]);
   }
@@ -116,6 +118,10 @@ thread_init (void)
   init_thread (initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
+
+  /* Start as 0 as when the idle thread is incremented it will increase the
+      count to 1 */
+  ready_count = 0;
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -257,6 +263,8 @@ thread_block (void)
   ASSERT (!intr_context ());
   ASSERT (intr_get_level () == INTR_OFF);
 
+  if (thread_current () != idle_thread)
+    ready_count--;
   thread_current ()->status = THREAD_BLOCKED;
   schedule ();
 }
@@ -276,7 +284,9 @@ thread_unblock (struct thread *t)
 
   ASSERT (is_thread (t));
 
+
   old_level = intr_disable ();
+  ready_count++;
   ASSERT (t->status == THREAD_BLOCKED);
   add_to_ready_list(t);
   t->status = THREAD_READY;
@@ -333,6 +343,7 @@ thread_exit (void)
   intr_disable ();
 
   list_remove (&thread_current ()->allelem);
+  ready_count--;
 
   thread_current ()->status = THREAD_DYING;
   schedule ();
@@ -403,13 +414,22 @@ void
 thread_calculate_priority (struct thread *thread, void *aux UNUSED)
 {
   ASSERT (thread_mlfqs);
+  ASSERT (intr_get_level () == INTR_OFF);
+
+  int last_priority = thread->priority;
 
   thread->priority = PRI_MAX - fix_round (fix_div (thread->recent_cpu, fix_int(4))) - thread->nice * 2;
-  thread->priority = thread->priority < 0 ? 0 : thread->priority;
+  thread->priority = thread->priority < PRI_MIN ? PRI_MIN : thread->priority;
+  thread->priority = thread->priority > PRI_MAX ? PRI_MAX : thread->priority;
 
-  if (thread->elem.next != NULL && thread->elem.prev != NULL)
-    list_remove(&thread->elem);
-  list_push_back (&priority_list[thread->priority], &thread->elem);
+
+  if (thread->priority != last_priority && thread->status == THREAD_READY
+        && thread != thread_current ())
+  {
+    if (thread->elem.next != NULL && thread->elem.prev != NULL)
+      list_remove(&thread->elem);
+    list_push_back (&priority_list[thread->priority], &thread->elem);
+  }
 }
 
 /* Returns the priority of an external thread */
@@ -491,23 +511,23 @@ thread_set_nice (int nice)
   ASSERT (thread_mlfqs);
 
   thread_current ()->nice = nice;
+
+  enum intr_level old_level;
+  old_level = intr_disable ();
+
   thread_calculate_priority (thread_current (), 0);
 
-  struct thread *t = NULL;
-
-  int i;
-  for (i = PRI_MAX; i >= 0; i--)
+  int i = PRI_MAX;
+  while (i > thread_get_priority())
   {
     if (!list_empty (&priority_list[i]))
     {
-      t = list_entry (list_begin (&priority_list[i]), struct thread, elem);
+      thread_yield();
     }
+    i--;
   }
 
-  if (t != thread_current ())
-  {
-    thread_yield();
-  }
+  intr_set_level(old_level);
 }
 
 /* Returns the current thread's nice value. */
@@ -529,9 +549,10 @@ static void
 update_load_avg (void)
 {
   fixed_point_t overflow = load_avg;
-  load_avg = fix_add (fix_mul (load_avg, fix_int (59)), fix_int(list_size (&ready_list)));
 
-  ASSERT (fix_compare (load_avg, overflow) == 1);
+  load_avg = fix_add (fix_mul (load_avg, fix_int (59)), fix_int(ready_count));
+
+  ASSERT (fix_compare (load_avg, overflow) != -1);
 
   load_avg = fix_div (load_avg, fix_int (60));
 }
@@ -556,8 +577,8 @@ thread_increment_cpu (void)
 void
 thread_update_cpu(struct thread *t, void *aux UNUSED)
 {
-  fixed_point_t coeff = fix_add (fix_scale (t->recent_cpu, 2), fix_int (1));
-  coeff = fix_div (fix_scale (t->recent_cpu, 2), coeff);
+  fixed_point_t coeff = fix_add (fix_scale (load_avg, 2), fix_int (1));
+  coeff = fix_div (fix_scale (load_avg, 2), coeff);
   t->recent_cpu = fix_mul(t->recent_cpu,coeff);
   t->recent_cpu = fix_add(t->recent_cpu, fix_int (t->nice));
 }
@@ -685,24 +706,22 @@ next_thread_to_run (void)
 {
   if (thread_mlfqs)
   {
-    struct thread *t = NULL;
     int i;
     for (i = PRI_MAX; i >= 0; i--)
     {
       if (!list_empty(&priority_list[i]))
       {
-        t = list_entry(list_pop_front(&priority_list[i]), struct thread, elem);
-        break;
+        return list_entry(list_pop_front(&priority_list[i]), struct thread, elem);
       }
     }
-    return t != NULL ? t : idle_thread;
+    return idle_thread;
   }
   else
   {
     if (list_empty (&ready_list))
       return idle_thread;
     else
-      return list_entry(list_pop_front(&ready_list), struct thread, elem);
+      return list_entry (list_pop_front (&ready_list), struct thread, elem);
   }
 }
 
@@ -775,30 +794,30 @@ schedule (void)
   thread_schedule_tail (prev);
 }
 
-/* Adds the thread to the ready list in order of priority in order of Highest
-  priority ot the lowest */
+/* Adds the thread to the ready list */
 static void
 add_to_ready_list (struct thread * ready_thread)
 {
   ASSERT (is_thread (ready_thread));
-
+  ASSERT (intr_get_level() == INTR_OFF);
   if (thread_mlfqs)
   {
     list_push_back(&priority_list[thread_get_max_priority(ready_thread)],
                     &ready_thread->elem);
   }
   else{
-    struct list_elem *e = list_begin (&ready_list);
+    struct list_elem *e = list_begin(&ready_list);
     struct thread *t = list_entry (e, struct thread, elem);
 
-    while (e != list_end (&ready_list) &&
-            thread_get_max_priority(ready_thread) > thread_get_max_priority(t))
+    while(e != list_end (&ready_list) &&
+     (thread_get_max_priority (t) >= thread_get_max_priority (ready_thread)))
     {
-      e = list_next(e);
-      t = list_entry (e, struct thread, elem);
+        e = list_next (e);
+        t = list_entry (e, struct thread, elem);
     }
-
-    list_insert (e,&ready_thread->elem);
+    /* Insert the thread in order in the queue, need to insert BEFORE element
+      with a greater tick value */
+    list_insert (e, &ready_thread->elem);
   }
 }
 
