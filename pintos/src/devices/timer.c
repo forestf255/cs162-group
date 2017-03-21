@@ -293,21 +293,21 @@ add_to_sleep(struct list * sleep_list, struct sleep_list_elem * sleep_thread)
   ASSERT (sleep_thread != NULL);
 
   /* Iterate through list to insert new sleeping thread in the right order */
-  struct list_elem *next_element = list_end(sleep_list)->prev;
+  struct list_elem *next_element = list_begin(sleep_list);
   struct sleep_list_elem *next_sleep_thread = list_entry (next_element,
                                                   struct sleep_list_elem,
                                                   elem);
 
-  while(next_element != &sleep_list->head
-        && (next_sleep_thread->ticks > sleep_thread->ticks)){
+  while(next_element != &sleep_list->tail
+        && (next_sleep_thread->ticks < sleep_thread->ticks)){
 
-      next_element = list_prev (next_element);
+      next_element = list_next (next_element);
       next_sleep_thread = list_entry (next_element, struct sleep_list_elem,
                                       elem);
   }
   /* Insert the thread in order in the queue, need to insert BEFORE element
     with a greater tick value */
-  list_insert (next_element->next, &sleep_thread->elem);
+  list_insert (next_element, &sleep_thread->elem);
 }
 
 /* Removes a thread from the queue of sleeping threads */
@@ -328,7 +328,7 @@ sleep_tick(struct list * sleep_list)
                                                   elem);
 
   while(next_element != &sleep_list->tail
-        && timer_elapsed (next_sleep_thread->ticks) > 0){
+        && timer_elapsed (next_sleep_thread->ticks) >= 0){
 
       remove_from_sleep(next_sleep_thread);
 
